@@ -1,4 +1,4 @@
-# DOT-5 Fantasy Console
+# D5asm Assembler
 
 An assembler for [DOT-5 fantasy console](https://github.com/Vglin21/dot-5).
 
