@@ -12,10 +12,13 @@
 #else
   #define ASM_NAME "d5asm"
 #endif
+
 #define MAX_LABEL_LEN 64
 #define MAX_LINE_LEN 512
-#define MAX_SYMBOLS 248
-#define MAX_LABELS 128
+
+#define SYMBOL_INIT_ALLOC 256
+#define LABEL_INIT_ALLOC 128
+#define BIN_INIT_ALLOC 256
 
 bool error = false;
 bool asm_error = false;
@@ -101,15 +104,18 @@ const char *keywords[] = {
     ".QWORD"
 };
 
-Symbol symbols[MAX_SYMBOLS];
-word symbol_count = 0;
+dword symbol_alloc = SYMBOL_INIT_ALLOC;
+Symbol *symbols;
+dword symbol_count = 0;
 
-Label labels[MAX_LABELS];
-word label_count = 0;
+dword label_alloc = LABEL_INIT_ALLOC;
+Label *labels;
+dword label_count = 0;
 
-byte bin[ROM_SIZE] = {0};
-byte bin_addr = 0;
-byte bin_count = 0;
+dword bin_alloc = BIN_INIT_ALLOC;
+byte *bin;
+dword bin_addr = 0;
+dword bin_count = 0;
 
 void to_big_letters(char *str) {
     for (dword c = 0; c < strlen(str); ++c)
@@ -293,6 +299,8 @@ void read_symbol_value(Symbol *symb) {
 }
 
 void read_symbol() {
+    if (!symbols) return;
+
     Symbol *symb = &symbols[symbol_count];
     memset(symb, 0, sizeof(Symbol));
 
@@ -341,6 +349,11 @@ void read_symbol() {
         if (is_eol()) {
             ++bin_addr;
             ++symbol_count;
+
+            if (symbol_count >= symbol_alloc) {
+                symbol_alloc <<= 1;
+                symbols = (Symbol*)realloc(symbols, symbol_alloc * sizeof(Symbol));
+            }
         } else {
             if (line[lpos] == '#') {
                 symb->flags |= SF_IMMEDIATE;
@@ -369,6 +382,11 @@ void read_symbol() {
             if (!error) {
                 bin_addr += 2;
                 ++symbol_count;
+
+                if (symbol_count >= symbol_alloc) {
+                    symbol_alloc <<= 1;
+                    symbols = (Symbol*)realloc(symbols, symbol_alloc * sizeof(Symbol));
+                }
             }
         }
     }
@@ -377,6 +395,8 @@ void read_symbol() {
 }
 
 void read_label() {
+    if (!labels) return;
+
     Label *label = &labels[label_count];
     memset(label, 0, sizeof(Label));
 
@@ -430,28 +450,60 @@ void read_label() {
         }
     } else label->address = bin_addr;
 
-    if (!error) ++label_count;
+    if (!error) {
+        ++label_count;
+    
+        if (label_count >= label_alloc) {
+            label_alloc <<= 1;
+            labels = (Label*)realloc(labels, label_alloc * sizeof(Label));
+        }
+    }
 }
 
 void to_bin(Symbol symb) {
     if (symb.name[0] == '.') {
-        // for fuck's sake it's 2 AM and i'm SLEEPY give me some slack
         if (!strcmp(symb.name, ".ORG")) {
-            if (bin_count != 0) bin_count = (symb.arg - bin_addr);
-            bin_addr = (symb.arg - bin_addr);
-        } else if (!strcmp(symb.name, ".BYTE")) {
-            bin_addr++; bin[bin_count++] = symb.arg;
-        } else if (!strcmp(symb.name, ".WORD")) {
-            for (byte shift = 0; shift < 16; shift += 8) {
-                bin_addr++; bin[bin_count++] = (byte)(symb.arg >> shift);
+            if (bin_count != 0) {
+                word bc = bin_count + (int32_t)(symb.arg - bin_addr);
+
+                if (bc >= bin_alloc && bin_alloc != ROM_SIZE) {
+                    while (bc >= bin_alloc) bin_alloc <<= 1;
+
+                    if (bin_alloc > ROM_SIZE) bin_alloc = ROM_SIZE;
+                    bin = (byte*)realloc(bin, bin_alloc);
+
+                    if (!bin) return;
+                }
+
+                if (bc > ROM_SIZE) bc = ROM_SIZE;
+                
+                memset(&bin[bin_count], 0, bin_alloc - bin_count);
+                bin_count = bc;
             }
-        } else if (!strcmp(symb.name, ".DWORD")) {
-            for (byte shift = 0; shift < 32; shift += 8) {
-                bin_addr++; bin[bin_count++] = (byte)(symb.arg >> shift);
-            }
-        } else if (!strcmp(symb.name, ".QWORD")) {
-            for (byte shift = 0; shift < 64; shift += 8) {
-                bin_addr++; bin[bin_count++] = (byte)(symb.arg >> shift);
+            bin_addr = symb.arg;
+        } else {
+            byte bit_size = 0;
+
+            if (!strcmp(symb.name, ".BYTE")) bit_size = 8;
+            else if (!strcmp(symb.name, ".WORD")) bit_size = 16;
+            else if (!strcmp(symb.name, ".DWORD")) bit_size = 32;
+            else if (!strcmp(symb.name, ".QWORD")) bit_size = 64;
+
+            if (bit_size) {
+                if (bin_count >= ROM_SIZE) return;
+
+                for (byte shift = 0; shift < bit_size; shift += 8) {
+                    bin_addr++; bin[bin_count++] = (byte)(symb.arg >> shift);
+                }
+
+                if (bin_count >= bin_alloc) {
+                    bin_alloc <<= 1;
+
+                    if (bin_alloc > ROM_SIZE) bin_alloc = ROM_SIZE;
+                    bin = (byte*)realloc(bin, bin_alloc);
+                }
+
+                if (!bin) return;
             }
         }
     } else {
@@ -479,15 +531,35 @@ void to_bin(Symbol symb) {
                     }
 
                     if (!found) {
-                        printf(ASM_NAME": error: label \"%s\" is undefined\n", symb.label);
+                        printf(ASM_NAME": error: label \"%s\" was referenced but never defined\n", symb.label);
                         asm_error = true;
                     }
                 }
 
+                if (bin_count >= ROM_SIZE) return;
+
                 if (symb.flags & SF_IMMEDIATE) { bin_addr++; bin[bin_count++] = opcode.imm; }
                 else  { bin_addr++; bin[bin_count++] = opcode.zp; }
 
-                if (bin_count < ROM_SIZE)  { bin_addr++; bin[bin_count++] = symb.arg; }
+                if (bin_count >= bin_alloc) {
+                    bin_alloc <<= 1;
+
+                    if (bin_alloc > ROM_SIZE) bin_alloc = ROM_SIZE;
+                    bin = (byte*)realloc(bin, bin_alloc);
+                }
+
+                if (!bin) return;
+
+                if (bin_count < ROM_SIZE)  {
+                    bin_addr++; bin[bin_count++] = symb.arg; 
+                
+                    if (bin_count >= bin_alloc) {
+                        bin_alloc <<= 1;
+
+                        if (bin_alloc > ROM_SIZE) bin_alloc = ROM_SIZE;
+                        bin = (byte*)realloc(bin, bin_alloc);
+                    }
+                }
             }
         }
     }
@@ -550,6 +622,12 @@ int main(int argc, char *argv[]) {
         if (file) fclose(file);
         return 1;
     }
+
+    symbols = (Symbol*)malloc(symbol_alloc * sizeof(Symbol));
+    labels = (Label*)malloc(label_alloc * sizeof(Label));
+
+    if (bin_alloc > ROM_SIZE) bin_alloc = ROM_SIZE;
+    bin = (byte*)malloc(bin_alloc);
     
     while (fgets(line, 256, file)) {
         bool nl = true;
@@ -587,15 +665,21 @@ int main(int argc, char *argv[]) {
     bin_addr = 0;
     for (byte c = 0; c < symbol_count; ++c) to_bin(symbols[c]);
 
+    free(symbols);
+    free(labels);
+
     if (error || asm_error) {
         printf(ASM_NAME": assembly terminated\n");
+        free(bin);
         return 1;
     } else {
         if (!(file = fopen(out_file, s("wb")))) return 1;
         
-        fwrite(bin, 1, ROM_SIZE, file);
+        fwrite(bin, 1, bin_count, file);
         printf(ASM_NAME": %d bytes written\n", bin_count);
     
+        free(bin);
+
         fclose(file);
     }
 

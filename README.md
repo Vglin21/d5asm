@@ -18,7 +18,7 @@ cmake -B build
 cmake --build build
 ```
 
-### Assembling and Running a Program
+### Assembling a Program
 - **NOTE:** The repository includes example assembly code in `examples/`.
 
 ```sh
