@@ -12,6 +12,7 @@ An assembler for [DOT-5 fantasy console](https://github.com/Vglin21/dot-5).
 ```sh
 # Clone the repository
 git clone https://github.com/Vglin21/d5asm
+cd d5asm
 
 # Configure and compile the assembler
 cmake -B build
