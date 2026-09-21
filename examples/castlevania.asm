@@ -180,13 +180,13 @@ setPixel1:
     sta pixel1
 
     sub pixel4
-    bne heckWhipCollision
+    bne checkWhipCollision
 
     lda #0
     sta pixel0
     sta pixel3
 
-heckWhipCollision:
+checkWhipCollision:
     lda pixel3
     sub pixel2
     bne endVBlank

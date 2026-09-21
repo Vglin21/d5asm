@@ -23,6 +23,7 @@
 bool error = false;
 bool asm_error = false;
 bool line_read = false;
+bool nl = false;
 
 char line[MAX_LINE_LEN] = {0};
 word line_count = 0;
@@ -38,17 +39,17 @@ char serr[MAX_LINE_LEN];
 
 void logerr(const char *msg) {
 #ifdef _WIN32
-    wprintf(L"%ls:%d:%d: error: %s\n", src_file, line_count, lpos, msg);
+    fwprintf(stderr, L"%ls:%d:%d: error: %s\n", src_file, line_count, lpos, msg);
 #else
-    printf("%s:%d:%d: error: %s\n", src_file, line_count, lpos, msg);
+    fprintf(stderr, "%s:%d:%d: error: %s\n", src_file, line_count, lpos, msg);
 #endif
 
-    if (line[strlen(line)-1] == '\n') printf("| %s", line);
-    else printf("| %s\n", line);
+    if (line[strlen(line)-1] == '\n') fprintf(stderr, "| %s", line);
+    else fprintf(stderr, "| %s\n", line);
 
     memset(serr, 0, MAX_LINE_LEN);
     memset(serr, ' ', lpos);
-    printf("| %s^\n", serr);
+    fprintf(stderr, "| %s^\n", serr);
 
     error = true;
 }
@@ -157,13 +158,9 @@ void skip_space() { while (!is_eol() && line[lpos] == ' ') ++lpos; }
 qword read_hex() {
     char hex[17] = {0};
     byte hsize = 0;
-    byte shift = 0;
-    qword ret = 0;
-    
-    skip_space();
     
     while (!is_eol() && hsize < 16 && is_hex(line[lpos]))
-        hex[hsize++] = line[lpos++];
+    hex[hsize++] = line[lpos++];
     
     if (!is_eol() && is_hex(line[lpos])) {
         logerr("hex value is too long");
@@ -177,6 +174,9 @@ qword read_hex() {
 
     if (error) return 0;
 
+    byte shift = 0;
+    qword ret = 0;
+
     for (byte c = hsize - 1; c < hsize;) {
         char h = hex[c--];
 
@@ -186,16 +186,12 @@ qword read_hex() {
 
         shift += 4;
     }
-    return (qword)ret;
+    return ret;
 }
 
 qword read_binary() {
     char binary[65] = {0};
     byte bsize = 0;
-    byte shift = 0;
-    qword ret = 0;
-
-    skip_space();
 
     while (!is_eol() && bsize < 64 && is_binary(line[lpos]))
         binary[bsize++] = line[lpos++];
@@ -212,20 +208,22 @@ qword read_binary() {
 
     if (error) return 0;
 
+    byte shift = 0;
+    qword ret = 0;
+
     for (byte c = bsize - 1; c < bsize;) 
         ret += (binary[c--] - '0') << (shift++);
-    
-    return (qword)ret;
+    return ret;
 }
 
 qword read_decimal() {
-    char num[33] = {0};
+    char num[65] = {0};
     
     byte c = 0;
-    while (c < 32 && is_digit(line[lpos]) && lpos < MAX_LINE_LEN)
+    while (!is_eol() && c < 64 && is_digit(line[lpos]))
         num[c++] = line[lpos++];
     
-    if (lpos < MAX_LINE_LEN && is_digit(line[lpos])) {
+    if (!is_eol() && is_digit(line[lpos])) {
         logerr("decimal value is too long");
         while (!is_eol() && is_digit(line[lpos])) ++lpos;
     }
@@ -238,6 +236,25 @@ qword read_decimal() {
     if (error) return 0;
     
     return (qword)atoi(num);
+}
+
+void read_name(char *dest, dword count) {
+    byte c = 0;
+    while (!is_eol() && (is_letter(line[lpos]) || is_digit(line[lpos])) && c < count)
+        dest[c++] = line[lpos++];
+    dest[c] = '\0';
+
+    if (!is_eol() && (is_letter(line[lpos]) || is_digit(line[lpos]))) {
+        logerr("label is too long");
+        while (!is_eol() && (is_letter(line[lpos]) || is_digit(line[lpos]))) ++lpos;
+    }
+    
+    if (!is_empty()) {
+        if ((line[lpos] == ':' || line[lpos] == '=') && !nl) {
+            logerr("unexpected symbol");
+            while (!is_empty()) ++lpos;
+        }
+    }
 }
 
 void read_symbol_name(Symbol *symb) {
@@ -254,8 +271,10 @@ void read_symbol_name(Symbol *symb) {
     
     if (!is_empty()) {
         if (is_letter(line[lpos])) {
-            if (symb->name[0] == '.') logerr("keyword is too long");
-            else logerr("operation name is too long");
+            if (symb->name[0] == '.')
+                logerr("keyword is too long");
+            else
+                logerr("operation name is too long");
         } else logerr("unexpected symbol");
         
         while (!is_empty()) ++lpos;
@@ -265,12 +284,12 @@ void read_symbol_name(Symbol *symb) {
     if (symb->name[0] == '.') {
         for (c = 0; c < (sizeof(keywords) / sizeof(char*));)
             if (!strcmp(keywords[c++], symb->name)) return;
+            
         logerr("unrecognized keyword");
     } else {
-        for (c = 0; c < (sizeof(opcodes) / sizeof(Opcode));) {
-            Opcode opcode = opcodes[c++];
-            if (!strcmp(opcode.name, symb->name)) return;
-        }
+        for (c = 0; c < (sizeof(opcodes) / sizeof(Opcode));)
+            if (!strcmp(opcodes[c++].name, symb->name)) return;
+        
         logerr("unrecognized operation");
     }
 }
@@ -281,20 +300,26 @@ void read_symbol_value(Symbol *symb) {
         ++lpos;
 
         if (is_empty()) {
-            logerr("expected a value");
+            logerr("expected a hex value");
             return;
         }
 
-        symb->arg = read_hex();
+        if (!is_hex(line[lpos])) {
+            logerr("expected a hex value");
+            return;
+        } else symb->arg = read_hex();
     } else if (line[lpos] == '%') {
         ++lpos;
 
         if (is_empty()) {
-            logerr("expected a value");
+            logerr("expected a binary value");
             return;
         }
 
-        symb->arg = read_binary();
+        if (!is_binary(line[lpos])) {
+            logerr("expected a binary value");
+            return;
+        } else symb->arg = read_binary();
     } else symb->arg = read_decimal();
 }
 
@@ -304,14 +329,13 @@ void read_symbol() {
     Symbol *symb = &symbols[symbol_count];
     memset(symb, 0, sizeof(Symbol));
 
-    read_symbol_name(symb);
-    
+    read_symbol_name(symb); 
     skip_space();
 
     if (symb->name[0] == '.') {
         if (is_eol()) logerr("no value given");
         else {
-            while (1) {
+            while (true) {
                 char ch = line[lpos];
                 if (ch == '$' || ch == '%' || is_digit(ch)) read_symbol_value(symb);
                 else {
@@ -327,17 +351,16 @@ void read_symbol() {
                 else if (!strcmp(symb->name, ".QWORD")) bin_addr += 8;
                 
                 ++symbol_count;
-                
                 skip_space();
                 
                 if (!is_eol() && line[lpos] == ',') {
-                    ++lpos;
-
                     if (!strcmp(symb->name, ".ORG")) {
                         logerr("can't take more than one value");
+                        ++lpos;
                         break;
                     }
-
+                    
+                    ++lpos;
                     skip_space();
 
                     symb = &symbols[symbol_count];
@@ -363,17 +386,8 @@ void read_symbol() {
             if (is_empty()) logerr("expected a value");
             else if (line[lpos] == '$' || line[lpos] == '%' || is_digit(line[lpos])) read_symbol_value(symb);
             else if (is_letter(line[lpos])) {
-                byte c = 0;
-                while (!is_eol() && (is_letter(line[lpos]) || is_digit(line[lpos])) && c < MAX_LABEL_LEN)
-                    symb->label[c++] = line[lpos++];
-                
-                symb->label[c] = '\0';
+                read_name(symb->label, MAX_LABEL_LEN);
                 symb->flags |= SF_HAS_ARG;
-    
-                if (!is_empty()) {
-                    logerr("unexpected symbol");
-                    while (!is_empty()) ++lpos;
-                }
             } else {
                 logerr("unexpected symbol");
                 while (!is_empty()) ++lpos;
@@ -400,10 +414,8 @@ void read_label() {
     Label *label = &labels[label_count];
     memset(label, 0, sizeof(Label));
 
-    byte c = 0;
-    while (!is_eol() && (is_letter(line[lpos]) || is_digit(line[lpos])) && c < MAX_LABEL_LEN)
-        label->str[c++] = line[lpos++];
-    label->str[c] = '\0';
+    read_name(label->str, MAX_LABEL_LEN);
+    if (error) return;
 
     skip_space();
 
@@ -420,22 +432,28 @@ void read_label() {
                     ++lpos;
 
                     if (is_empty()) {
-                        logerr("expected a value");
+                        logerr("expected a hex value");
                         line_read = true;
                         return;
                     }
-
-                    label->address = read_hex();
+                    
+                    if (!is_hex(line[lpos])) {
+                        logerr("expected a hex symbol");
+                        return;
+                    } else label->address = read_hex();
                 } else if (line[lpos] == '%') {
                     ++lpos;
 
                     if (is_empty()) {
-                        logerr("expected a value");
+                        logerr("expected a binary value");
                         line_read = true;
                         return;
                     }
-
-                    label->address = read_binary();
+                    
+                    if (!is_binary(line[lpos])) {
+                        logerr("expected a binary symbol");
+                        return;
+                    } else label->address = read_binary();
                 } else if (is_digit(line[lpos])) label->address = read_decimal();
                 else {
                     logerr("unexpected symbol");
@@ -464,18 +482,14 @@ void to_bin(Symbol symb) {
     if (symb.name[0] == '.') {
         if (!strcmp(symb.name, ".ORG")) {
             if (bin_count != 0) {
-                word bc = bin_count + (int32_t)(symb.arg - bin_addr);
+                word bc = bin_count + (int64_t)(symb.arg - bin_addr);
 
-                if (bc >= bin_alloc && bin_alloc != ROM_SIZE) {
+                if (bc >= bin_alloc) {
                     while (bc >= bin_alloc) bin_alloc <<= 1;
 
-                    if (bin_alloc > ROM_SIZE) bin_alloc = ROM_SIZE;
                     bin = (byte*)realloc(bin, bin_alloc);
-
                     if (!bin) return;
                 }
-
-                if (bc > ROM_SIZE) bc = ROM_SIZE;
                 
                 memset(&bin[bin_count], 0, bin_alloc - bin_count);
                 bin_count = bc;
@@ -490,24 +504,19 @@ void to_bin(Symbol symb) {
             else if (!strcmp(symb.name, ".QWORD")) bit_size = 64;
 
             if (bit_size) {
-                if (bin_count >= ROM_SIZE) return;
-
                 for (byte shift = 0; shift < bit_size; shift += 8) {
                     bin_addr++; bin[bin_count++] = (byte)(symb.arg >> shift);
                 }
 
                 if (bin_count >= bin_alloc) {
                     bin_alloc <<= 1;
-
-                    if (bin_alloc > ROM_SIZE) bin_alloc = ROM_SIZE;
                     bin = (byte*)realloc(bin, bin_alloc);
                 }
-
                 if (!bin) return;
             }
         }
     } else {
-        for (byte c = 0; c < (sizeof(opcodes) / sizeof(Opcode)) && bin_count < ROM_SIZE; ++c) {
+        for (byte c = 0; c < (sizeof(opcodes) / sizeof(Opcode)); ++c) {
             if (!strcmp(symb.name, opcodes[c].name)) {
                 Opcode opcode = opcodes[c];
                 if (!(symb.flags & SF_HAS_ARG)) {
@@ -531,34 +540,25 @@ void to_bin(Symbol symb) {
                     }
 
                     if (!found) {
-                        printf(ASM_NAME": error: label \"%s\" was referenced but never defined\n", symb.label);
+                        fprintf(stderr, ASM_NAME": error: label \"%s\" was referenced but never defined\n", symb.label);
                         asm_error = true;
                     }
                 }
-
-                if (bin_count >= ROM_SIZE) return;
 
                 if (symb.flags & SF_IMMEDIATE) { bin_addr++; bin[bin_count++] = opcode.imm; }
                 else  { bin_addr++; bin[bin_count++] = opcode.zp; }
 
                 if (bin_count >= bin_alloc) {
                     bin_alloc <<= 1;
-
-                    if (bin_alloc > ROM_SIZE) bin_alloc = ROM_SIZE;
                     bin = (byte*)realloc(bin, bin_alloc);
                 }
-
                 if (!bin) return;
 
-                if (bin_count < ROM_SIZE)  {
-                    bin_addr++; bin[bin_count++] = symb.arg; 
-                
-                    if (bin_count >= bin_alloc) {
-                        bin_alloc <<= 1;
-
-                        if (bin_alloc > ROM_SIZE) bin_alloc = ROM_SIZE;
-                        bin = (byte*)realloc(bin, bin_alloc);
-                    }
+                bin_addr++; bin[bin_count++] = symb.arg; 
+            
+                if (bin_count >= bin_alloc) {
+                    bin_alloc <<= 1;
+                    bin = (byte*)realloc(bin, bin_alloc);
                 }
             }
         }
@@ -598,39 +598,37 @@ int main(int argc, char *argv[]) {
             return 0;
         } else if (!strcmp(argv[c], s("-o"))) {
             if (++c >= argc) {
-                printf(ASM_NAME": error: missing filename after \"-o\"\n");
+                fprintf(stderr, ASM_NAME": error: missing filename after \"-o\"\n");
                 error = true;
             } else out_file = argv[c];
         } else if (src_file != NULL)
-            printf(ASM_NAME": warning: more than one file are given, any file after \""sfmt"\" will be skipped\n", src_file);
+            fprintf(stderr, ASM_NAME": warning: more than one file is given, any file after \""sfmt"\" will be skipped\n", src_file);
         else src_file = argv[c];
     }
 
     FILE *file;
     if (!src_file) {
-        printf(ASM_NAME": error: no input file\n");
+        fprintf(stderr, ASM_NAME": error: no input file\n");
         error = true;
     } else {
         if (!(file = fopen(src_file, s("r")))) {
-            printf(ASM_NAME": error: couldn't open \""sfmt"\"\n", src_file);
+            fprintf(stderr, ASM_NAME": error: couldn't open \""sfmt"\"\n", src_file);
             error = true;
         }
     }
 
     if (error) {
-        printf(ASM_NAME": assembly terminated\n");
+        fprintf(stderr, ASM_NAME": assembly terminated\n");
         if (file) fclose(file);
         return 1;
     }
 
     symbols = (Symbol*)malloc(symbol_alloc * sizeof(Symbol));
     labels = (Label*)malloc(label_alloc * sizeof(Label));
-
-    if (bin_alloc > ROM_SIZE) bin_alloc = ROM_SIZE;
     bin = (byte*)malloc(bin_alloc);
     
     while (fgets(line, 256, file)) {
-        bool nl = true;
+        nl = true;
         lpos = 0;
         ++line_count;
         error = false;
@@ -669,7 +667,7 @@ int main(int argc, char *argv[]) {
     free(labels);
 
     if (error || asm_error) {
-        printf(ASM_NAME": assembly terminated\n");
+        fprintf(stderr, ASM_NAME": assembly terminated\n");
         free(bin);
         return 1;
     } else {
