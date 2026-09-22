@@ -79,8 +79,9 @@ typedef enum {
 } SymbolFlag;
 
 typedef struct {
-    char str[MAX_LABEL_LEN+1];
-    byte address;
+    char name[MAX_LABEL_LEN+1];
+    qword value;
+    char label[MAX_LABEL_LEN+1];
 } Label;
 
 const Opcode opcodes[] = {
@@ -257,6 +258,34 @@ void read_name(char *dest, dword count) {
     }
 }
 
+qword read_value() {
+    if (line[lpos] == '$') {
+        ++lpos;
+
+        if (is_empty()) {
+            logerr("expected a hex value");
+            return 0;
+        }
+
+        if (!is_hex(line[lpos])) {
+            logerr("expected a hex value");
+            return 0;
+        } else return read_hex();
+    } else if (line[lpos] == '%') {
+        ++lpos;
+
+        if (is_empty()) {
+            logerr("expected a binary value");
+            return 0;
+        }
+
+        if (!is_binary(line[lpos])) {
+            logerr("expected a binary value");
+            return 0;
+        } else return read_binary();
+    } else return read_decimal();
+}
+
 void read_symbol_name(Symbol *symb) {
     memset(symb->name, 0, 9);
 
@@ -294,35 +323,6 @@ void read_symbol_name(Symbol *symb) {
     }
 }
 
-void read_symbol_value(Symbol *symb) {
-    symb->flags |= SF_HAS_ARG;
-    if (line[lpos] == '$') {
-        ++lpos;
-
-        if (is_empty()) {
-            logerr("expected a hex value");
-            return;
-        }
-
-        if (!is_hex(line[lpos])) {
-            logerr("expected a hex value");
-            return;
-        } else symb->arg = read_hex();
-    } else if (line[lpos] == '%') {
-        ++lpos;
-
-        if (is_empty()) {
-            logerr("expected a binary value");
-            return;
-        }
-
-        if (!is_binary(line[lpos])) {
-            logerr("expected a binary value");
-            return;
-        } else symb->arg = read_binary();
-    } else symb->arg = read_decimal();
-}
-
 void read_symbol() {
     if (!symbols) return;
 
@@ -337,15 +337,22 @@ void read_symbol() {
         else {
             while (true) {
                 char ch = line[lpos];
-                if (ch == '$' || ch == '%' || is_digit(ch)) read_symbol_value(symb);
-                else {
+                if (ch == '$' || ch == '%' || is_digit(ch)) {
+                    symb->arg = read_value();
+                    symb->flags |= SF_HAS_ARG;
+                } else if (is_letter(ch)) {
+                    read_name(symb->label, MAX_LABEL_LEN);
+                    symb->flags |= SF_HAS_ARG;
+                } else {
                     logerr("unexpected symbol");
                     while (!is_empty()) ++lpos;
                     break;
                 }
                 
-                if (!strcmp(symb->name, ".ORG")) bin_addr = symb->arg;
-                else if (!strcmp(symb->name, ".BYTE")) ++bin_addr;
+                if (!strcmp(symb->name, ".ORG")) {
+                    if (symb->label[0] != '\0') logerr("can't use labels on .org");
+                    else bin_addr = symb->arg;
+                } else if (!strcmp(symb->name, ".BYTE")) ++bin_addr;
                 else if (!strcmp(symb->name, ".WORD")) bin_addr += 2;
                 else if (!strcmp(symb->name, ".DWORD")) bin_addr += 4;
                 else if (!strcmp(symb->name, ".QWORD")) bin_addr += 8;
@@ -383,9 +390,12 @@ void read_symbol() {
                 ++lpos;
             }
     
+            char ch = line[lpos];
             if (is_empty()) logerr("expected a value");
-            else if (line[lpos] == '$' || line[lpos] == '%' || is_digit(line[lpos])) read_symbol_value(symb);
-            else if (is_letter(line[lpos])) {
+            else if (ch == '$' || ch == '%' || is_digit(ch)) {
+                symb->arg = read_value();
+                symb->flags |= SF_HAS_ARG;
+            } else if (is_letter(ch)) {
                 read_name(symb->label, MAX_LABEL_LEN);
                 symb->flags |= SF_HAS_ARG;
             } else {
@@ -414,7 +424,7 @@ void read_label() {
     Label *label = &labels[label_count];
     memset(label, 0, sizeof(Label));
 
-    read_name(label->str, MAX_LABEL_LEN);
+    read_name(label->name, MAX_LABEL_LEN);
     if (error) return;
 
     skip_space();
@@ -428,33 +438,9 @@ void read_label() {
                 ++lpos;
                 skip_space();
     
-                if (line[lpos] == '$') {
-                    ++lpos;
-
-                    if (is_empty()) {
-                        logerr("expected a hex value");
-                        line_read = true;
-                        return;
-                    }
-                    
-                    if (!is_hex(line[lpos])) {
-                        logerr("expected a hex symbol");
-                        return;
-                    } else label->address = read_hex();
-                } else if (line[lpos] == '%') {
-                    ++lpos;
-
-                    if (is_empty()) {
-                        logerr("expected a binary value");
-                        line_read = true;
-                        return;
-                    }
-                    
-                    if (!is_binary(line[lpos])) {
-                        logerr("expected a binary symbol");
-                        return;
-                    } else label->address = read_binary();
-                } else if (is_digit(line[lpos])) label->address = read_decimal();
+                char ch = line[lpos];
+                if (ch == '$' || ch == '%' || is_digit(ch)) label->value = read_value();
+                else if (is_letter(ch)) read_name(label->label, MAX_LABEL_LEN);
                 else {
                     logerr("unexpected symbol");
                     while (!is_empty()) ++lpos;
@@ -462,11 +448,11 @@ void read_label() {
 
                 line_read = true;
             } else {
-                label->address = bin_addr;
+                label->value = bin_addr;
                 ++lpos;
             }
         }
-    } else label->address = bin_addr;
+    } else label->value = bin_addr;
 
     if (!error) {
         ++label_count;
@@ -478,9 +464,35 @@ void read_label() {
     }
 }
 
+qword find_label(const char *label, bool is_branch) {
+    bool found = false;
+    qword ret = 0;
+
+    for (byte i = 0; i < label_count; ++i) {
+        if (!strcmp(label, labels[i].name)) {
+            if (is_branch)
+                ret = labels[i].value - bin_addr - 2;
+            else ret = labels[i].value;
+
+            found = true;
+            break;
+        }
+    }
+
+    if (!found) {
+        fprintf(stderr, ASM_NAME": error: label \"%s\" was referenced but never defined\n", label);
+        asm_error = true;
+    }
+
+    return ret;
+}
+
 void to_bin(Symbol symb) {
     if (symb.name[0] == '.') {
         if (!strcmp(symb.name, ".ORG")) {
+            if (symb.label[0] != '\0')
+                symb.arg = find_label(symb.label, false);
+
             if (bin_count != 0) {
                 word bc = bin_count + (int64_t)(symb.arg - bin_addr);
 
@@ -504,6 +516,9 @@ void to_bin(Symbol symb) {
             else if (!strcmp(symb.name, ".QWORD")) bit_size = 64;
 
             if (bit_size) {
+                if (symb.label[0] != '\0')
+                    symb.arg = find_label(symb.label, false);
+
                 for (byte shift = 0; shift < bit_size; shift += 8) {
                     bin_addr++; bin[bin_count++] = (byte)(symb.arg >> shift);
                 }
@@ -524,26 +539,8 @@ void to_bin(Symbol symb) {
                     return;
                 }
 
-                if (symb.label[0] != '\0') {
-                    bool found = false;
-
-                    for (byte i = 0; i < label_count; ++i) {
-                        if (!strcmp(symb.label, labels[i].str)) {
-                            if (opcode.type & OT_BRANCH)
-                                symb.arg = labels[i].address - bin_addr - 2;
-                            else symb.arg = labels[i].address;
-
-                            found = true;
-                            
-                            break;
-                        }
-                    }
-
-                    if (!found) {
-                        fprintf(stderr, ASM_NAME": error: label \"%s\" was referenced but never defined\n", symb.label);
-                        asm_error = true;
-                    }
-                }
+                if (symb.label[0] != '\0')
+                    symb.arg = find_label(symb.label, opcode.type & OT_BRANCH);
 
                 if (symb.flags & SF_IMMEDIATE) { bin_addr++; bin[bin_count++] = opcode.imm; }
                 else  { bin_addr++; bin[bin_count++] = opcode.zp; }
