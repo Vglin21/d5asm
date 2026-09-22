@@ -63,7 +63,8 @@ typedef struct {
 } Opcode;
 
 typedef enum {
-    OT_BRANCH = 1
+    OT_HAS_ARG = 1,
+    OT_BRANCH = 2
 } OpcodeType;
 
 typedef struct {
@@ -85,17 +86,17 @@ typedef struct {
 } Label;
 
 const Opcode opcodes[] = {
-    {"INC", INC, 0,     0,     0},
-    {"DEC", DEC, 0,     0,     0},
-    {"LDA", 0,   LDA_I, LDA_Z, 0},
-    {"STA", 0,   0,     STA,   0},
-    {"JMP", 0,   JMP,   JMP,   0},
-    {"BEQ", 0,   BEQ,   BEQ,   1},
-    {"BNE", 0,   BNE,   BNE,   1},
-    {"ADD", 0,   ADD_I, ADD_Z, 0},
-    {"SUB", 0,   SUB_I, SUB_Z, 0},
-    {"ORA", 0,   ORA_I, ORA_Z, 0},
-    {"AND", 0,   AND_I, AND_Z, 0}
+    {"INC", INC, 0,     0,     0b00000000},
+    {"DEC", DEC, 0,     0,     0b00000000},
+    {"LDA", 0,   LDA_I, LDA_Z, 0b00000001},
+    {"STA", 0,   0,     STA,   0b00000001},
+    {"JMP", 0,   JMP,   JMP,   0b00000001},
+    {"BEQ", 0,   BEQ,   BEQ,   0b00000011},
+    {"BNE", 0,   BNE,   BNE,   0b00000011},
+    {"ADD", 0,   ADD_I, ADD_Z, 0b00000001},
+    {"SUB", 0,   SUB_I, SUB_Z, 0b00000001},
+    {"ORA", 0,   ORA_I, ORA_Z, 0b00000001},
+    {"AND", 0,   AND_I, AND_Z, 0b00000001}
 };
 
 const char *keywords[] = {
@@ -377,12 +378,23 @@ void read_symbol() {
         }
     } else {
         if (is_eol()) {
-            ++bin_addr;
-            ++symbol_count;
+            bool has_arg = false;
+            for (word c = 0; c < (sizeof(opcodes) / sizeof(Opcode)); ++c) {
+                if (!strcmp(opcodes[c].name, symb->name)) {
+                    has_arg = opcodes[c].type & OT_HAS_ARG;
+                    break;
+                }
+            }
 
-            if (symbol_count >= symbol_alloc) {
-                symbol_alloc <<= 1;
-                symbols = (Symbol*)realloc(symbols, symbol_alloc * sizeof(Symbol));
+            if (has_arg) logerr("expected an operand");
+            else {
+                ++bin_addr;
+                ++symbol_count;
+    
+                if (symbol_count >= symbol_alloc) {
+                    symbol_alloc <<= 1;
+                    symbols = (Symbol*)realloc(symbols, symbol_alloc * sizeof(Symbol));
+                }
             }
         } else {
             if (line[lpos] == '#') {
